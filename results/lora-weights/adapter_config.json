@@ -19,10 +19,10 @@
   "rank_pattern": {},
   "revision": null,
   "target_modules": [
-    "v_proj",
     "q_proj",
-    "k_proj",
-    "o_proj"
+    "o_proj",
+    "v_proj",
+    "k_proj"
   ],
   "task_type": "CAUSAL_LM",
   "use_rslora": false

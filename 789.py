@@ -31,9 +31,15 @@ basic_training_data = [
 # 轉換資料和標記函數需要修改
 def convert_to_instruction_format(data):
     """將原始資料轉換為模型訓練所需的格式"""
+    print("轉換前資料型態:", type(data))
+    print("轉換前資料是否為列表:", isinstance(data, list))
+    print("轉換前第一筆資料:", data[0] if len(data) > 0 else "無資料")
+    
     instruction_data = []
     
-    for item in data:
+    for i, item in enumerate(data):
+        print(f"處理第 {i+1} 筆資料, 型態: {type(item)}")
+        
         instruction_item = {
             "instruction": item["question"],
             "input": "",
@@ -41,6 +47,21 @@ def convert_to_instruction_format(data):
             "category": item["category"]
         }
         instruction_data.append(instruction_item)
+    
+    print("轉換後資料大小:", len(instruction_data))
+    print("轉換後第一筆資料:", instruction_data[0] if len(instruction_data) > 0 else "無資料")
+    
+    if i == 1:
+            print("\n第二筆資料轉換結果:")
+            print("原始資料:", item)
+            print("轉換後資料:", instruction_item)
+            print("轉換後資料類型:", type(instruction_item))
+            print("各欄位類型:")
+            print("  - instruction:", type(instruction_item["instruction"]))
+            print("  - input:", type(instruction_item["input"]))
+            print("  - output:", type(instruction_item["output"]))
+            print("  - category:", type(instruction_item["category"]))
+            print()
     
     return instruction_data
 
