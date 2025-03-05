@@ -34,4 +34,4 @@ if __name__ == "__main__":
     print(f"原始資料集大小: {len(data)}")
     print(f"指令格式資料集大小: {len(instruction_dataset)}")
     print("\n指令格式資料集樣本:")
-    print(instruction_dataset[0])
+    print(instruction_dataset[:2])
