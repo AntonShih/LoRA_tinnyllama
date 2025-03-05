@@ -4,19 +4,16 @@ from transformers import (
     AutoModelForCausalLM, 
     AutoTokenizer, 
     TrainingArguments, 
-    Trainer, 
-    DataCollatorForLanguageModeling
+    Trainer
 )
 from peft import (
     LoraConfig, 
-    get_peft_model, 
-    PeftModel
+    get_peft_model
 )
 
 from datasets import Dataset
 
-# 不從 basic_training_data.py 導入，而是直接在這裡定義資料
-# 從 data.training_data.basic_training_data import basic_training_data
+# 直接在這裡定義資料
 basic_training_data = [
     {
         "category": "黴菌基礎知識",
@@ -27,21 +24,16 @@ basic_training_data = [
         "category": "黴菌基礎知識",
         "question": "鞋子上的黴菌是從哪裡來的？",
         "answer": "鞋子上的黴菌主要來自空氣中懸浮的黴菌孢子，這些孢子無處不在。當孢子落在濕潤的鞋面或鞋內，遇到適合的溫度和營養源時，就會開始生長繁殖。此外，鞋子接觸地面時也可能從土壤中帶入黴菌孢子，或是從已感染黴菌的環境（如潮濕的浴室地板）轉移到鞋子上。"
-    }
-    # 這裡只定義了兩筆資料作為示例，您需要添加其餘資料或正確導入
+    },
+    # 添加更多訓練數據...
 ]
 
-# 檢查原始資料格式
-print("原始資料型態:", type(basic_training_data))
-print("原始資料第一筆:", basic_training_data[0])
-print("原始資料大小:", len(basic_training_data))
-
+# 轉換資料和標記函數需要修改
 def convert_to_instruction_format(data):
     """將原始資料轉換為模型訓練所需的格式"""
     instruction_data = []
     
     for item in data:
-        # 為每個資料項創建一個新的字典
         instruction_item = {
             "instruction": item["question"],
             "input": "",
@@ -52,108 +44,136 @@ def convert_to_instruction_format(data):
     
     return instruction_data
 
-# 轉換資料
-instruction_data = convert_to_instruction_format(basic_training_data)
-print("轉換後第一筆資料:", instruction_data[0])
-print("轉換後資料大小:", len(instruction_data))
+def tokenize_function(examples, tokenizer, max_length=512):
+    """將文本轉換為模型能夠處理的標記形式"""
+    # 構建提示文本
+    prompts = []
+    for i in range(len(examples["instruction"])):
+        instruction = examples["instruction"][i]
+        input_text = examples["input"][i]
+        output = examples["output"][i]
+        
+        if input_text:
+            prompt = f"Instruction: {instruction}\nInput: {input_text}\nOutput: {output}"
+        else:
+            prompt = f"Instruction: {instruction}\nOutput: {output}"
+        
+        prompts.append(prompt)
+    
+    # 標記化
+    tokenized = tokenizer(
+        prompts,
+        padding="max_length",
+        truncation=True,
+        max_length=max_length,
+        return_tensors="pt"
+    )
+    
+    # 添加標籤，用於自回歸訓練
+    tokenized["labels"] = tokenized["input_ids"].clone()
+    
+    return tokenized
 
-# 轉換成 Hugging Face Dataset 格式
-instruction_dataset = Dataset.from_list(instruction_data)
-print("Dataset 第一筆:", instruction_dataset[0])
-print("Dataset 大小:", len(instruction_dataset))
-
-def load_base_model(model_path):
-    """載入基礎模型和 tokenizer（適用於 CPU 訓練）"""
-    print(f"正在載入基礎模型: {model_path}")
-
-    # ✅ 確保 CPU 訓練使用 float32，如果支援 bf16 則使用
-    dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float32
-
+# 主要程序
+def main():
+    print("開始準備訓練資料...")
+    
+    # 轉換資料
+    instruction_data = convert_to_instruction_format(basic_training_data)
+    print(f"轉換後資料數量: {len(instruction_data)}")
+    print(f"資料範例: {instruction_data[0]}")
+    
+    # 轉換成 Hugging Face Dataset 格式
+    dataset = Dataset.from_list(instruction_data)
+    print(f"Dataset 大小: {len(dataset)}")
+    
+    # 載入模型和 tokenizer
+    model_path = "./data/model/tinyllama-local"
+    print(f"正在載入模型: {model_path}")
+    
     tokenizer = AutoTokenizer.from_pretrained(model_path)
-    tokenizer.pad_token = tokenizer.eos_token  # 確保 pad token 設定正確
-
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+    
+    # 對資料集進行標記化
+    print("正在標記化資料集...")
+    tokenized_dataset = dataset.map(
+        lambda examples: tokenize_function(examples, tokenizer),
+        batched=True,
+        remove_columns=dataset.column_names  # 移除原始文本列
+    )
+    print(f"標記化後的資料集大小: {len(tokenized_dataset)}")
+    print(f"標記化後的資料集欄位: {tokenized_dataset.column_names}")
+    
+    # 載入模型
+    dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float32
     model = AutoModelForCausalLM.from_pretrained(
         model_path,
         torch_dtype=dtype,
-        device_map={"": "cpu"}  # ✅ 強制使用 CPU
+        device_map={"": "cpu"}
     )
-
-    return model, tokenizer
-
-def setup_lora_model(base_model, r=8, alpha=16, dropout=0.1, target_modules=None):
-    """設定 LoRA 並應用到模型"""
+    
+    # 設定 LoRA
     print("設定 LoRA 配置...")
-
-    if target_modules is None:
-        target_modules = ["q_proj", "v_proj", "k_proj", "o_proj"]  # 確保 TinyLlama 相容
-
     lora_config = LoraConfig(
-        r=r,
-        lora_alpha=alpha,
-        target_modules=target_modules,
-        lora_dropout=dropout,
+        r=8,
+        lora_alpha=16,
+        target_modules=["q_proj", "v_proj", "k_proj", "o_proj"],
+        lora_dropout=0.1,
         bias="none",
         task_type="CAUSAL_LM"
     )
-
-    model = get_peft_model(base_model, lora_config)
+    
+    model = get_peft_model(model, lora_config)
     model.print_trainable_parameters()
-
-    return model
-
-def train_lora_model(model, tokenizer, dataset, output_dir):
-    """訓練 LoRA 模型（適用於 CPU 訓練）"""
-    print("開始 LoRA 微調...")
-
-    # ✅ 確保 CPU 訓練使用 float32，如果支援 bf16 則使用
-    bf16 = torch.cuda.is_bf16_supported() if torch.cuda.is_available() else False
-
+    
+    # 設定訓練參數
+    output_dir = "./results"
     training_args = TrainingArguments(
         output_dir=output_dir,
         learning_rate=2e-4,
-        per_device_train_batch_size=4,
+        per_device_train_batch_size=1,  # 降低批次大小
         gradient_accumulation_steps=4,
         num_train_epochs=3,
         weight_decay=0.01,
-        logging_steps=10,
-        save_steps=200,
+        logging_steps=1,
+        save_steps=10,
         warmup_ratio=0.03,
-        bf16=bf16,  # ✅ CPU 訓練時使用 bf16（如果支援），否則回退 float32
-        report_to="tensorboard"
+        save_total_limit=2,
+        report_to="none"  # 減少額外的報告
     )
-
-    data_collator = DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=False)
-
+    
+    # 初始化 Trainer
     trainer = Trainer(
         model=model,
         args=training_args,
-        train_dataset=dataset,
-        data_collator=data_collator
+        train_dataset=tokenized_dataset,
+        tokenizer=tokenizer
     )
-
+    
+    # 開始訓練
+    print("開始訓練...")
     trainer.train()
-
-    # ✅ 儲存 LoRA 權重
+    
+    # 保存模型
     lora_output_dir = os.path.join(output_dir, "lora-weights")
     os.makedirs(lora_output_dir, exist_ok=True)
     model.save_pretrained(lora_output_dir)
     tokenizer.save_pretrained(lora_output_dir)
-
-    print(f"LoRA 模型已保存至: {lora_output_dir}")
-
-    return model, lora_output_dir
-
-def test_model(model, tokenizer, test_prompts):
-    """測試 LoRA 模型的生成能力"""
-    print("測試模型回應...")
-
-    results = []
+    
+    print(f"訓練完成，模型已保存至: {lora_output_dir}")
+    
+    # 測試模型
+    test_prompts = [
+        "如何防止鞋子發霉？",
+        "鞋子上的黴菌有什麼危害？"
+    ]
+    
+    print("\n開始測試模型...")
     for prompt in test_prompts:
         print(f"\n問題: {prompt}")
-
-        inputs = tokenizer(prompt, return_tensors="pt")
-        inputs = {key: value.to("cpu") for key, value in inputs.items()}  # ✅ 確保在 CPU 運行
-
+        
+        inputs = tokenizer(f"Instruction: {prompt}\nOutput:", return_tensors="pt")
         with torch.no_grad():
             outputs = model.generate(
                 inputs["input_ids"],
@@ -162,53 +182,14 @@ def test_model(model, tokenizer, test_prompts):
                 top_p=0.9,
                 do_sample=True
             )
-
+        
         response = tokenizer.decode(outputs[0], skip_special_tokens=True)
         print(f"回應: {response}")
-        results.append({"prompt": prompt, "response": response})
-
-    return results
-
-def main(base_model_path, instruction_dataset, output_dir, test_prompts=None):
-    """執行完整的 LoRA 訓練流程"""
-    base_model, tokenizer = load_base_model(base_model_path)
-    lora_model = setup_lora_model(base_model)
-
-    trained_model, lora_weights_path = train_lora_model(
-        lora_model, tokenizer, instruction_dataset, output_dir
-    )
-
-    if test_prompts:
-        test_results = test_model(trained_model, tokenizer, test_prompts)
-
-    print("LoRA 微調流程完成!")
-    return trained_model, tokenizer, lora_weights_path
 
 if __name__ == "__main__":
-    base_model_path = "./data/model/tinyllama-local"
-    output_dir = "./results"
-
-    test_prompts = [
-        "如何防止鞋子發霉？",
-        "鞋子上的黴菌有什麼危害？"
-    ]
-
     try:
-        model, tokenizer, lora_path = main(
-            base_model_path, 
-            instruction_dataset,  # 已在上方定義
-            output_dir,
-            test_prompts
-        )
-
-        print(f"成功完成訓練，LoRA 權重保存在: {lora_path}")
+        main()
     except Exception as e:
         print(f"訓練過程中發生錯誤: {str(e)}")
         import traceback
-        traceback.print_exc()  # 輸出完整錯誤堆疊
-    finally:
-        # 釋放資源
-        if 'model' in locals():
-            del model
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
+        traceback.print_exc()
