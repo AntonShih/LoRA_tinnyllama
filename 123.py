@@ -79,7 +79,7 @@ def train_lora_model(model, tokenizer, dataset, output_dir,
         logging_steps=10,
         save_steps=200,
         warmup_ratio=0.03,
-        fp16=use_half_precision,
+        bf16=use_half_precision,
         report_to="tensorboard"
     )
     
